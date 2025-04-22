@@ -9,6 +9,8 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import pytz
 import json
+import time
+from functools import lru_cache
 
 # Load environment variables
 load_dotenv()
@@ -32,6 +34,7 @@ COLUMN_TODAY = 11
 COLUMN_HOUR_BEFORE = 10
 COLUMN_CHAT_ID = 15
 COLUMN_SENT_REMINDERS = 16  # New column for tracking sent reminders
+COLUMN_INTERVIEW_RESULT = 12  # Column for interview result
 
 
 # Check environment variables
@@ -63,6 +66,13 @@ except Exception as e:
 # Set timezone
 TZ = pytz.timezone('Asia/Tashkent')
 
+# Добавим кэширование для уменьшения количества запросов
+@lru_cache(maxsize=100)
+def get_cached_phone_numbers():
+    """Cache phone numbers to reduce API calls."""
+    time.sleep(1)  # Добавляем задержку в 1 секунду
+    return sheet.col_values(COLUMN_PHONE)
+
 def normalize_phone(phone):
     """Normalize phone number by removing all non-digit characters."""
     if not phone:
@@ -71,10 +81,22 @@ def normalize_phone(phone):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command."""
-    keyboard = [[KeyboardButton("Поделиться номером телефона", request_contact=True)]]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+    keyboard = [[KeyboardButton("📲 Отправить контакт", request_contact=True)]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    
+    # Отправляем инструкцию с эмодзи
+    instruction = """Добро пожаловать! 👋
+
+Чтобы подтвердить собеседование:
+
+1️⃣ Найдите кнопку "📲 Отправить контакт" внизу экрана
+2️⃣ Нажмите на нее
+3️⃣ Подтвердите отправку контакта
+
+⬇️ Кнопка находится здесь ⬇️"""
+    
     await update.message.reply_text(
-        "Добро пожаловать! Для продолжения, пожалуйста, поделитесь своим номером телефона.",
+        instruction,
         reply_markup=reply_markup
     )
 
@@ -100,7 +122,8 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.info(f"Received phone: {phone}, normalized to: {normalized_phone}")
         
         try:
-            phone_column = sheet.col_values(COLUMN_PHONE)
+            # Используем кэшированные номера телефонов
+            phone_column = get_cached_phone_numbers()
             logger.info(f"Found {len(phone_column)} phone numbers in sheet")
             
             row = None
@@ -115,6 +138,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 raise ValueError("Phone number not found")
             
             try:
+                time.sleep(1)  # Добавляем задержку перед обновлением
                 sheet.update_cell(row, COLUMN_CHAT_ID, str(chat_id))
                 logger.info(f"Successfully updated chat_id to {chat_id}")
             except Exception as e:
@@ -148,12 +172,14 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             day_before = interview_date - timedelta(days=1)
             hour_before = interview_date - timedelta(hours=1)
             today = interview_date
+            after_interview = interview_date + timedelta(hours=2)  # New reminder 2 hours after interview
             
             # Create sent_reminders object with scheduled times
             sent_reminders = {
                 'day_before': day_before.strftime("%Y-%m-%d %H:%M:%S"),
                 'hour_before': hour_before.strftime("%Y-%m-%d %H:%M:%S"),
-                'today': today.strftime("%Y-%m-%d %H:%M:%S")
+                'today': today.strftime("%Y-%m-%d %H:%M:%S"),
+                'after_interview': after_interview.strftime("%Y-%m-%d %H:%M:%S")  # New reminder time
             }
             
             # Update sent_reminders in sheet
@@ -172,7 +198,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "Вам придут напоминания:\n"
                 f"- За день до собеседования ({day_before.strftime('%Y-%m-%d %H:%M')})\n"
                 f"- За час до собеседования ({hour_before.strftime('%Y-%m-%d %H:%M')})\n"
-                f"- В день собеседования ({today.strftime('%Y-%m-%d %H:%M')})"
+                f"- В день собеседования ({today.strftime('%Y-%m-%d %H:%M')})\n"
             )
             
             await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove())
@@ -221,8 +247,8 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                 location = sheet.cell(row, COLUMN_LOCATION).value
                 
                 # Check each reminder type
-                for reminder_type in ['day_before', 'hour_before', 'today']:
-                    scheduled_time_str = reminders[reminder_type]
+                for reminder_type in ['day_before', 'hour_before', 'today', 'after_interview']:
+                    scheduled_time_str = reminders.get(reminder_type)
                     if not scheduled_time_str:  # Skip if this reminder is already sent
                         continue
                         
@@ -238,18 +264,19 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                         reminder_column = COLUMN_DAY_BEFORE
                     elif reminder_type == 'hour_before':
                         reminder_column = COLUMN_HOUR_BEFORE
-                    else:  # today
-                        reminder_column = COLUMN_TODAY #COLUMN_HOUR_BEFORE
+                    elif reminder_type == 'today':
+                        reminder_column = COLUMN_TODAY
+                    else:  # after_interview
+                        reminder_column = COLUMN_INTERVIEW_RESULT
                     
                     # If within 2 minutes of scheduled time
                     if time_diff <= 120:  # 120 seconds = 2 minutes
                         logger.info(f"Sending {reminder_type} reminder to chat {chat_id}")
                         await send_reminder(context, int(chat_id), location, reminder_type, row)
                         
-                        # Mark as sent in the reminder column
-                        sheet.update_cell(row, reminder_column, "Отправлено")
-                        
-                      
+                        # Mark as sent in the reminder column if not after_interview
+                        if reminder_type != 'after_interview':
+                            sheet.update_cell(row, reminder_column, "Отправлено")
                         
                         # Remove this reminder from JSON by setting it to null
                         reminders[reminder_type] = None
@@ -275,30 +302,42 @@ async def send_reminder(context: ContextTypes.DEFAULT_TYPE, chat_id: int, locati
         date_str = sheet.cell(row, COLUMN_DATE).value
         time_str = sheet.cell(row, COLUMN_TIME).value
         
-        is_link = 'http' in location.lower()
-        if is_link:
+        if reminder_type == 'after_interview':
             message = (
-                "Добрый день! Напоминаем о предстоящем собеседовании.\n\n"
-                f"📅 Дата: {date_str}\n"
-                f"⏰ Время: {time_str}\n"
-                f"🔗 Ссылка: {location}\n\n"
-                "Планируете ли вы участвовать в собеседовании?"
+                "Как прошло собеседование? Вы принимаете предложение?"
             )
-        else:
-            message = (
-                "Добрый день! Напоминаем о предстоящем собеседовании.\n\n"
-                f"📅 Дата: {date_str}\n"
-                f"⏰ Время: {time_str}\n"
-                f"📍 Адрес: {location}\n\n"
-                "Будете ли вы присутствовать на собеседовании?"
-            )
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("Да", callback_data=f"confirm_yes_{reminder_type}"),
-                InlineKeyboardButton("Нет", callback_data=f"confirm_no_{reminder_type}")
+            keyboard = [
+                [
+                    InlineKeyboardButton("Да ✅", callback_data=f"result_yes"),
+                    InlineKeyboardButton("Нет ❌", callback_data=f"result_no"),
+                    InlineKeyboardButton("Думаю 🤔", callback_data=f"result_thinking")
+                ]
             ]
-        ]
+        else:
+            is_link = 'http' in location.lower()
+            if is_link:
+                message = (
+                    "Добрый день! Напоминаем о предстоящем собеседовании.\n\n"
+                    f"📅 Дата: {date_str}\n"
+                    f"⏰ Время: {time_str}\n"
+                    f"🔗 Ссылка: {location}\n\n"
+                    "Планируете ли вы участвовать в собеседовании?"
+                )
+            else:
+                message = (
+                    "Добрый день! Напоминаем о предстоящем собеседовании.\n\n"
+                    f"📅 Дата: {date_str}\n"
+                    f"⏰ Время: {time_str}\n"
+                    f"📍 Адрес: {location}\n\n"
+                    "Будете ли вы присутствовать на собеседовании?"
+                )
+            keyboard = [
+                [
+                    InlineKeyboardButton("Да", callback_data=f"confirm_yes_{reminder_type}"),
+                    InlineKeyboardButton("Нет", callback_data=f"confirm_no_{reminder_type}")
+                ]
+            ]
+        
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         logger.info(f"Sending message to chat {chat_id}")
@@ -319,43 +358,68 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     try:
         # Parse callback data
-        callback_data = query.data  # format: "confirm_yes_day_before" or "confirm_no_hour_before"
-        parts = callback_data.split('_')
-        if len(parts) < 3:
-            raise ValueError(f"Invalid callback data format: {callback_data}")
+        callback_data = query.data
+        
+        if callback_data.startswith('result_'):
+            # Handle interview result
+            result = callback_data.split('_')[1]
+            result_text = {
+                'yes': 'Принял предложение ✅',
+                'no': 'Отказался ❌',
+                'thinking': 'Думает 🤔'
+            }.get(result, 'Неизвестно')
             
-        response = parts[1]  # "yes" or "no"
-        reminder_type = '_'.join(parts[2:])  # "day_before", "hour_before", or "today"
-        
-        logger.info(f"Processing callback: response={response}, reminder_type={reminder_type}")
-        
-        # Find the user's row
-        cell = sheet.find(str(update.effective_chat.id), in_column=COLUMN_CHAT_ID)
-        if not cell:
-            raise ValueError(f"Chat ID {update.effective_chat.id} not found in sheet")
-        
-        row = cell.row
-        
-        # Determine which column to update based on reminder type
-        if reminder_type == 'day_before':
-            column = COLUMN_DAY_BEFORE
-        elif reminder_type == 'hour_before':
-            column = COLUMN_HOUR_BEFORE
-        else:  # today
-            column = COLUMN_TODAY #COLUMN_HOUR_BEFORE
+            # Find the user's row
+            cell = sheet.find(str(update.effective_chat.id), in_column=COLUMN_CHAT_ID)
+            if not cell:
+                raise ValueError(f"Chat ID {update.effective_chat.id} not found in sheet")
             
-        # Update the response only in the specific reminder column
-        response_text = "Да" if response == "yes" else "Нет"
-        sheet.update_cell(row, column, response_text)
-        
-        logger.info(f"Updated response in row {row}, column {column} to {response_text}")
-        
-        # Send confirmation message
-        if response == "yes":
-            message = "Спасибо за ваш ответ! Ждем вас на собеседовании."
+            row = cell.row
+            
+            # Update the result in column 12
+            sheet.update_cell(row, COLUMN_INTERVIEW_RESULT, result_text)
+            
+            # Send confirmation message
+            if result == 'yes':
+                message = "Спасибо за ваш ответ! Мы рады, что вы приняли предложение."
+            elif result == 'no':
+                message = "Спасибо за ваш ответ. Жаль, что вы отказались."
+            else:
+                message = "Спасибо за ваш ответ. Пожалуйста, сообщите о вашем решении HR."
         else:
-            message = "Спасибо за ваш ответ. Пожалуйста, свяжитесь с HR для переноса собеседования."
+            # Handle regular confirmation
+            parts = callback_data.split('_')
+            if len(parts) < 3:
+                raise ValueError(f"Invalid callback data format: {callback_data}")
+                
+            response = parts[1]  # "yes" or "no"
+            reminder_type = '_'.join(parts[2:])  # "day_before", "hour_before", or "today"
             
+            # Find the user's row
+            cell = sheet.find(str(update.effective_chat.id), in_column=COLUMN_CHAT_ID)
+            if not cell:
+                raise ValueError(f"Chat ID {update.effective_chat.id} not found in sheet")
+            
+            row = cell.row
+            
+            # Determine which column to update based on reminder type
+            if reminder_type == 'day_before':
+                column = COLUMN_DAY_BEFORE
+            elif reminder_type == 'hour_before':
+                column = COLUMN_HOUR_BEFORE
+            else:  # today
+                column = COLUMN_TODAY
+                
+            # Update the response
+            response_text = "Да" if response == "yes" else "Нет"
+            sheet.update_cell(row, column, response_text)
+            
+            # Send confirmation message
+            if response == "yes":
+                message = "Спасибо за ваш ответ! Ждем вас на собеседовании."
+            else:
+                message = "Спасибо за ваш ответ. Пожалуйста, свяжитесь с HR для переноса собеседования."
+        
         await query.edit_message_text(text=message)
         
     except Exception as e:
