@@ -13,7 +13,7 @@ import time
 from functools import lru_cache
 
 # Load environment variables
-load_dotenv()
+load_dotenv(dotenv_path='.env')
 
 # Configure logging
 logging.basicConfig(
@@ -42,6 +42,9 @@ CREDENTIALS_FILE = os.getenv('GOOGLE_SHEETS_CREDENTIALS_FILE')
 SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
+print("Текущий токен:", TELEGRAM_TOKEN)
+
+
 if not CREDENTIALS_FILE or not SPREADSHEET_ID:
     logger.critical("GOOGLE_SHEETS_CREDENTIALS_FILE or SPREADSHEET_ID is not set!")
     exit(1)
@@ -67,11 +70,16 @@ except Exception as e:
 TZ = pytz.timezone('Asia/Tashkent')
 
 # Добавим кэширование для уменьшения количества запросов
-@lru_cache(maxsize=100)
 def get_cached_phone_numbers():
-    """Cache phone numbers to reduce API calls."""
-    time.sleep(1)  # Добавляем задержку в 1 секунду
-    return sheet.col_values(COLUMN_PHONE)
+    try:
+        time.sleep(1)  # Симуляция задержки
+        # Получаем данные из указанного столбца (без кэширования)
+        phone_numbers = sheet.col_values(COLUMN_PHONE)
+        print(f"Загружены данные: {phone_numbers}")  # Для отладки
+        return phone_numbers
+    except Exception as e:
+        print(f"Ошибка при получении данных: {e}")
+        return []  # В случае ошибки возвращаем пустой список
 
 def normalize_phone(phone):
     """Normalize phone number by removing all non-digit characters."""
@@ -269,8 +277,8 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                     else:  # after_interview
                         reminder_column = COLUMN_INTERVIEW_RESULT
                     
-                    # If within 2 minutes of scheduled time
-                    if time_diff <= 120:  # 120 seconds = 2 minutes
+                    # If within 1 minutes of scheduled time
+                    if time_diff <= 60:  # 60 seconds = 1 minutes
                         logger.info(f"Sending {reminder_type} reminder to chat {chat_id}")
                         await send_reminder(context, int(chat_id), location, reminder_type, row)
                         
